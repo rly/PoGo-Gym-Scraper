@@ -1,6 +1,21 @@
 // Load up the discord.js library
 const Discord = require("discord.js");
 
+// Load sqlite3 library
+const sqlite3 = require("sqlite3").verbose();
+
+const db = new sqlite3.Database('GymCoordinates');
+//CREATE TABLE gym (name TEXT, latlng TEXT COLLATE NOCASE);
+//CREATE UNIQUE INDEX gym_index ON gym(name COLLATE NOCASE);
+const gymInsert = db.prepare("INSERT INTO gym VALUES (?,?)");
+
+// print whole database
+db.each(`SELECT * FROM gym`, 
+  (err, row) => console.log(row)
+);
+
+db.on("error", error => console.log("Database error: ", error));
+
 // Create the main client object with methods to interface with Discord
 const client = new Discord.Client();
 
@@ -11,6 +26,8 @@ const config = require("./config.json");
 // config.gmapsApiKey contains the bot's Google Maps Static API key
 
 var isPurgeEnabled = true;
+
+const gmapsUrlBase = 'https://www.google.com/maps/search/?api=1&query=';
 
 // info on GymHuntrBot
 const gymHuntrbotName = "GymHuntrBot";
@@ -45,15 +62,15 @@ client.on("message", async message => {
     // parse GymHuntrBot raid announcement
     const raidInfo = await parseGymHuntrbotMsg(message);
     
-    
-    
-    // post enhanced raid info in channel
-    postRaidInfo(message.channel, raidInfo);
-    
-    if (isReplaceGymHuntrBotPost) {
-      // delete the original GymHuntrBot post
-      message.delete().catch(O_o=>{});
-    }
+    // add the location and lat/lng to the database
+    gymInsert.run(raidInfo.cleanLoc, raidInfo.gpsCoords, error => {
+      if (!error) {
+        console.log(`Added ${raidInfo.cleanLoc}: ${raidInfo.gpsCoords} to database.`);
+        message.reply(`Added ${raidInfo.cleanLoc}: ${raidInfo.gpsCoords} to database.`);
+      } else {
+        console.log(`Error adding ${raidInfo.cleanLoc} to database.`);
+      }
+    });
   }
   
   if (message.author.bot) return;
@@ -102,19 +119,19 @@ client.on("message", async message => {
         .catch(error => message.reply(`I couldn't delete messages because of: ${error}`));
   }
   
-  // post raid info for the active raid at 
-  // the location entered (must be entered exactly as written in GymHuntrBot's original post / the PoGo gym name)
-  // e.g. +info Washington's Crossing
-  if (command === "info") {
-    const enteredLoc = args.join(' ').replace(/\*|\./g, '').trim(); // also remove any asterisks and .'s
-    await findRaid(enteredLoc)
-        .then(raidInfo => {
-          if (raidInfo) {
-            //postRaidInfo(message.channel, raidInfo);
-          } else {
-            message.reply(`Sorry ${message.author}, I couldn't find an active raid at ${enteredLoc}. Please check that you entered the location name correctly.`);
-          }
-        });
+  // get a Google Maps url based on the gym name. not case sensitive. periods and asterisks are removed.
+  // e.g. +whereis washington's crossing
+  if (command === "where" || command === "whereis" || command === "map") {
+    const enteredLoc = args.join(' ').replace(/\*/g, '').trim(); // remove any asterisks
+    findRaidCoords(enteredLoc, results => {
+      if (results != null && results.length > 0) {
+        for (row of results) {
+          message.reply(`**${row.name}**: ${gmapsUrlBase}${row.latlng}`);
+        }
+      } else {
+        message.reply(`Sorry, I couldn't find a gym named **${enteredLoc}**. Please check that you entered the name correctly.`);
+      }
+    });
   }
 });
 
@@ -135,134 +152,40 @@ function checkPermissionsManageMessages(message) {
   return true;
 }
 
-// search through previous self posts for raid information
-// TODO much better to have a database of raid information instead of searching and parsing through post history
-async function findRaid(enteredLoc) {
-  var foundRaidInfo = false;
-  for (let [chkey, ch] of client.channels) { // all channels in all servers - dangerous
-    if (ch.type != 'text')
-      continue;
-    
-    // search last X messages in all channels -- dangerous!! potentially super slow
-    await ch.fetchMessages({limit: raidlastMaxMessagesSearch}) 
-      .then(messages => {
-        for (let [key, msg] of messages) {
-          // only process msg if msg by this bot and in right format
-          if (msg.author.id != client.user.id || !msg.embeds[0])
-            continue;
-          
-          // parse previous post
-          const raidInfo = parseRaidInfo(msg);
-          
-          // check if location name matches the given name
-          if (raidInfo.cleanLoc.toLowerCase() != enteredLoc.toLowerCase()) {
-            continue;
-          }
-          
-          // check if there is still time remaining in the raid
-          if (raidInfo.raidTime.isBefore(moment())) {
-            continue;
-          }
-          
-          foundRaidInfo = raidInfo;
-          break;
-        }
-      });
-    if (foundRaidInfo)
-      break;
-  }
-  return foundRaidInfo;
+// TODO see if async/await can be used here
+function findRaidCoords(enteredLoc, callback) {
+  db.all(`SELECT name,latlng FROM gym where name like '${enteredLoc}'`, 
+    (err, rows) => {
+      if (err) {
+        console.log(`Database error finding raid: ${err}`);
+        callback(null);
+      } else {
+        callback(rows);
+      }
+    }
+  );
 }
 
 // process a GymHuntrBot message - create a new channel for coordinating the raid
 async function parseGymHuntrbotMsg(lastBotMessage) {
   const emb = lastBotMessage.embeds[0];
   
-  // get the pokemon thumbnail
-  const thumbUrl = emb.thumbnail.url;
-  
-  // get the GPS coords and google maps URL
+  // get the lat/lng
   const gpsCoords = new RegExp('^.*#(.*)','g').exec(emb.url)[1];
-  const gmapsUrl = gmapsUrlBase + gpsCoords;
-  const gmapsGeocodeOpts = {
-    method: 'GET',
-    uri: 'https://maps.googleapis.com/maps/api/geocode/json',
-    qs: {
-      key: config.gmapsApiKey,
-      latlng: gpsCoords
-    },
-    headers: {
-        'User-Agent': 'Request-Promise'
-    },
-    json: true // Automatically parses the JSON string in the response
-  }
-  const gmapsLinkName = await rp(gmapsGeocodeOpts)
-    .then(response => {
-      const gmapsFAddress = response.results[0].formatted_address;
-      return 'Map: ' + gmapsFAddress.split(',').slice(0, 2).join(',').replace('Township', 'Twp');
-    })
-    .catch(error => {
-       console.log(`Google Maps reverse geocoding failed for coordinates ${gpsCoords}. Error: ${error}`);
-       return 'Open in Google Maps';
-    });
-  console.log(gmapsLinkName);
-  
-  const descrip = emb.description;
-  const parts = descrip.split('\n'); // location name is parts[0], name is parts[1], time left is parts[3]
-    
-  // extract the pokemon name
-  const pokemonName = parts[1];
-  var shortPokemonName = pokemonName.toLowerCase();
-  for (var i = 0; i < shortPokemonNames.length; i++) { // shorten pokemon names
-    shortPokemonName = shortPokemonName.replace(shortPokemonNames[i][0], shortPokemonNames[i][1]);
-  }
-  shortPokemonName = shortPokemonName.substring(0, maxPokemonNameLength);
   
   // clean up location name
-  const loc = parts[0];
-  const cleanLoc = loc.replace(/\*|\./g, ''); // remove bold asterisks and trailing .
-  var shortLoc = loc.toLowerCase().replace(/\s|_/g, '-').replace(/[^\w-]/g, '');
-  for (var i = 0; i < shortLocNames.length; i++) { // shorten location names
-    shortLoc = shortLoc.replace(shortLocNames[i][0], shortLocNames[i][1]);
-  }
-  shortLoc = shortLoc.substring(0, maxLocNameLength);
-  shortLoc = shortLoc.replace(/-/g, ' ').trim().replace(/\s/g, '-'); // trim trailing -
-  
-  // extract the time remaining and compute the end time
-  // don't include seconds -- effectively round down
-  const timeRegex = new RegExp(/\*Raid Ending: (\d+) hours (\d+) min \d+ sec\*/g);
-  const raidTimeParts = timeRegex.exec(parts[3]);
-  const raidTime = moment(lastBotMessage.createdAt).add(raidTimeParts[1], 'h').add(raidTimeParts[2], 'm');
-  const raidTimeStr = raidTime.format('h-mma').toLowerCase();
-  const raidTimeStrColon = raidTime.format('h:mma');
-  const raidTimeRemaining = `${raidTimeParts[1]} h ${raidTimeParts[2]} m remaining`;
+  const cleanLoc = emb.description.split('\n')[0].replace(/\*/g, '').slice(0, -1).trim(); // remove bold asterisks and trailing .
     
   return {
-    pokemonName: pokemonName, 
-    shortPokemonName: shortPokemonName, 
     cleanLoc: cleanLoc, 
-    shortLoc: shortLoc, 
-    raidTime: raidTime, 
-    raidTimeStr: raidTimeStr, 
-    raidTimeStrColon: raidTimeStrColon, 
-    raidTimeRemaining: raidTimeRemaining, 
-    thumbUrl: thumbUrl, 
     gpsCoords: gpsCoords, 
-    gmapsUrl: gmapsUrl,
-    gmapsLinkName: gmapsLinkName
   }
 }
 
-async function postRaidInfo(channel, raidInfo) {
-  const newEmbed = new Discord.RichEmbed()
-    .setTitle(`${raidInfo.cleanLoc}`)
-    .setDescription(`**${raidInfo.pokemonName}**\nUntil **${raidInfo.raidTimeStrColon}** (${raidInfo.raidTimeRemaining})\n**[${raidInfo.gmapsLinkName}](${raidInfo.gmapsUrl})**`)
-    .setThumbnail(`${raidInfo.thumbUrl}`)
-    .setColor(embedColor);
-  if (isMapImageEnabled) {
-    newEmbed.setImage(`https://maps.googleapis.com/maps/api/staticmap?center=${raidInfo.gpsCoords}&zoom=15&scale=1&size=600x600&maptype=roadmap&key=${config.gmapsApiKey}&format=png&visual_refresh=true&markers=size:mid%7Ccolor:0xff0000%7Clabel:%7C${raidInfo.gpsCoords}`);
-  }
-  channel.send({embed: newEmbed});
-}
+process.on('SIGINT', () => {
+  gymInsert.finalize();
+  db.close();
+  process.exit(0);
+});
 
 client.login(config.token);
