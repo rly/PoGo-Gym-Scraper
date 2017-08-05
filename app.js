@@ -6,7 +6,8 @@ const sqlite3 = require("sqlite3").verbose();
 
 const db = new sqlite3.Database('gymdetails');
 //CREATE TABLE gym (name TEXT COLLATE NOCASE, latitude DOUBLE, longitude DOUBLE);
-//CREATE UNIQUE INDEX gym_index ON gym(name COLLATE NOCASE);
+// or import database with that format from elsewhere
+//CREATE UNIQUE INDEX gym_index ON gym(name COLLATE NOCASE, latitude, longitude);
 const gymInsert = db.prepare("INSERT INTO gym VALUES (?,?,?)");
 
 // print whole database
@@ -68,7 +69,10 @@ client.on("message", async message => {
         console.log(`Added ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude} to database.`);
         message.reply(`Added ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude} to database.`);
       } else {
-        console.log(`Error adding ${raidInfo.cleanLoc} to database: ${error}.`);
+        if (error.message.startsWith('SQLITE_CONSTRAINT: UNIQUE constraint failed'))
+          console.log(`Row already exists in database: ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude}.`);
+        else
+          console.log(`Error adding ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude} to database: ${error}.`);
       }
     });
   }
@@ -122,7 +126,7 @@ client.on("message", async message => {
   // get a Google Maps url based on the gym name. not case sensitive. periods and asterisks are removed.
   // e.g. +whereis washington's crossing
   if (command === "where" || command === "whereis" || command === "map") {
-    const enteredLoc = args.join(' ').replace(/\*/g, '').trim(); // remove any asterisks
+    const enteredLoc = args.join(' ').replace(/\*/g, '').trim(); // remove any asterisks, escape apostrophes
     findRaidCoords(enteredLoc, results => {
       if (results != null && results.length > 0) {
         for (row of results) {
@@ -154,7 +158,7 @@ function checkPermissionsManageMessages(message) {
 
 // TODO see if async/await can be used here
 function findRaidCoords(enteredLoc, callback) {
-  db.all(`SELECT name,latlng FROM gym where name like '${enteredLoc}'`, 
+  db.all('SELECT name,latitude,longitude FROM gym where name like ?', enteredLoc, 
     (err, rows) => {
       if (err) {
         console.log(`Database error finding raid: ${err}`);
