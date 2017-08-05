@@ -4,10 +4,10 @@ const Discord = require("discord.js");
 // Load sqlite3 library
 const sqlite3 = require("sqlite3").verbose();
 
-const db = new sqlite3.Database('GymCoordinates');
-//CREATE TABLE gym (name TEXT, latlng TEXT COLLATE NOCASE);
+const db = new sqlite3.Database('gymdetails');
+//CREATE TABLE gym (name TEXT COLLATE NOCASE, latitude DOUBLE, longitude DOUBLE);
 //CREATE UNIQUE INDEX gym_index ON gym(name COLLATE NOCASE);
-const gymInsert = db.prepare("INSERT INTO gym VALUES (?,?)");
+const gymInsert = db.prepare("INSERT INTO gym VALUES (?,?,?)");
 
 // print whole database
 db.each(`SELECT * FROM gym`, 
@@ -63,12 +63,12 @@ client.on("message", async message => {
     const raidInfo = await parseGymHuntrbotMsg(message);
     
     // add the location and lat/lng to the database
-    gymInsert.run(raidInfo.cleanLoc, raidInfo.gpsCoords, error => {
+    gymInsert.run(raidInfo.cleanLoc, raidInfo.latitude, raidInfo.longitude, error => {
       if (!error) {
-        console.log(`Added ${raidInfo.cleanLoc}: ${raidInfo.gpsCoords} to database.`);
-        message.reply(`Added ${raidInfo.cleanLoc}: ${raidInfo.gpsCoords} to database.`);
+        console.log(`Added ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude} to database.`);
+        message.reply(`Added ${raidInfo.cleanLoc}: ${raidInfo.latitude},${raidInfo.longitude} to database.`);
       } else {
-        console.log(`Error adding ${raidInfo.cleanLoc} to database.`);
+        console.log(`Error adding ${raidInfo.cleanLoc} to database: ${error}.`);
       }
     });
   }
@@ -126,7 +126,7 @@ client.on("message", async message => {
     findRaidCoords(enteredLoc, results => {
       if (results != null && results.length > 0) {
         for (row of results) {
-          message.reply(`**${row.name}**: ${gmapsUrlBase}${row.latlng}`);
+          message.reply(`**${row.name}**: ${gmapsUrlBase}${row.latitude},${row.longitude}`);
         }
       } else {
         message.reply(`Sorry, I couldn't find a gym named **${enteredLoc}**. Please check that you entered the name correctly.`);
@@ -171,7 +171,9 @@ async function parseGymHuntrbotMsg(lastBotMessage) {
   const emb = lastBotMessage.embeds[0];
   
   // get the lat/lng
-  const gpsCoords = new RegExp('^.*#(.*)','g').exec(emb.url)[1];
+  const gpsCoords = new RegExp('^.*#(.*)','g').exec(emb.url)[1].split(',');
+  const latitude = gpsCoords[0];
+  const longitude = gpsCoords[1];
   
   // clean up location name
   const cleanLoc = emb.description.split('\n')[0].replace(/\*/g, '').slice(0, -1).trim(); // remove bold asterisks and trailing .
@@ -179,6 +181,8 @@ async function parseGymHuntrbotMsg(lastBotMessage) {
   return {
     cleanLoc: cleanLoc, 
     gpsCoords: gpsCoords, 
+    latitude: latitude,
+    longitude: longitude
   }
 }
 
